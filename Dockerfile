@@ -19,9 +19,3 @@ EXPOSE 8000
 # Run the FastAPI application using Uvicorn
 # The --host 0.0.0.0 makes the server accessible from outside the container
 CMD ["gunicorn", "main:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
-
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libffi-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*

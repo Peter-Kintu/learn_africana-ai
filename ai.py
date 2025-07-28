@@ -7,27 +7,27 @@ import time
 import httpx
 import os
 
-# ✅ Logging
+# ✅ Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TutorBot")
 
-# ✅ FastAPI instance
+# ✅ FastAPI app
 app = FastAPI(
     title="AI TutorBot",
     description="An AI tutor assistant API powered by OpenRouter",
     version="1.0"
 )
 
-# ✅ CORS Middleware
+# ✅ CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change "*" to specific origins in production
+    allow_origins=["*"],  # Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ Request schema
+# ✅ Input schema
 class TutorRequest(BaseModel):
     student_id: str
     subject: str
@@ -37,10 +37,10 @@ class TutorRequest(BaseModel):
 # ✅ Config
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "openrouter/auto"
+MODEL = "mistral-7b-openorca"  # ✅ Free tier model
 MIN_DELAY = 10.0
 
-# ✅ Rate limiting state
+# ✅ Global rate limiter
 app.state.api_lock = asyncio.Lock()
 app.state.last_call_time = 0.0
 
@@ -66,7 +66,6 @@ def build_prompt(subject: str, level: str, question: str) -> str:
         "coding": "You teach programming with clear code samples.",
         "history": "You explain history as engaging stories."
     }
-
     intro = prompts.get(subject.lower(), "You are a helpful AI tutor.")
     return (
         f"{intro} The student is at a {level} level.\n"
@@ -74,15 +73,16 @@ def build_prompt(subject: str, level: str, question: str) -> str:
         f"Please explain in a clear, friendly tone with examples."
     )
 
-# ✅ AI logic
+# ✅ Ask OpenRouter
 async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
     if not OPENROUTER_API_KEY:
+        logger.error("Missing OpenRouter API Key.")
         raise HTTPException(status_code=500, detail="Missing OpenRouter API key")
 
     headers = {
-        "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://your-tutorbot.app",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://your-tutorbot.app",  # Optional for OpenRouter
         "X-Title": "AI TutorBot"
     }
 
@@ -98,38 +98,40 @@ async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
         for attempt in range(1, retries + 1):
             try:
                 response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", 2 ** attempt))
-                    logger.warning(f"Rate limited. Retrying in {retry_after}s...")
-                    await asyncio.sleep(retry_after)
-                    continue
-
                 response.raise_for_status()
                 data = response.json()
                 reply = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
                 if not reply:
-                    raise ValueError("Empty response from OpenRouter")
+                    raise ValueError("Empty reply from OpenRouter")
 
                 return reply
 
-            except Exception as e:
-                logger.error(f"OpenRouter call failed (attempt {attempt}): {e}")
-                if attempt == retries:
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Status error {e.response.status_code}: {e.response.text}")
+                if e.response.status_code == 429:
+                    retry_after = int(e.response.headers.get("Retry-After", 2 ** attempt))
+                    logger.warning(f"Rate limited. Retrying in {retry_after}s...")
+                    await asyncio.sleep(retry_after)
+                elif attempt == retries:
                     raise HTTPException(status_code=502, detail="Failed to get response from the tutor")
+            except Exception as e:
+                logger.error(f"Attempt {attempt} failed: {e}")
+                if attempt == retries:
+                    raise HTTPException(status_code=502, detail="TutorBot failed to respond")
 
-# ✅ API route
+# ✅ API endpoint
 @app.post("/ask_tutor")
 async def ask_tutor(request: TutorRequest):
     await wait_for_rate_limit()
-    logger.info(f"Received: {request.subject} | {request.question}")
+    logger.info(f"Student: {request.student_id} | Subject: {request.subject} | Question: {request.question}")
     prompt = build_prompt(request.subject, request.level, request.question)
-    response = await ask_openrouter(prompt, student_id=request.student_id)
+    answer = await ask_openrouter(prompt, student_id=request.student_id)
 
     return {
         "student_id": request.student_id,
         "subject": request.subject,
         "level": request.level,
         "question": request.question,
-        "answer": response
+        "answer": answer
     }

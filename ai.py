@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 import asyncio
@@ -6,7 +7,7 @@ import time
 import httpx
 import os
 
-#
+# ✅ Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("TutorBot")
 
@@ -17,6 +18,15 @@ app = FastAPI(
     version="1.0"
 )
 
+# ✅ CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # ⚠️ In production, replace "*" with allowed frontend domain(s)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ✅ Request schema
 class TutorRequest(BaseModel):
     student_id: str
@@ -25,16 +35,16 @@ class TutorRequest(BaseModel):
     question: str
 
 # ✅ Configuration
-# Use a safer way to load the API key (don't hardcode in production)
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Set this in your .env or environment
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "openrouter/auto"
 MIN_DELAY = 10.0  # seconds between global requests
 
-# ✅ Global rate limiter
+# ✅ Rate limiter state
 app.state.api_lock = asyncio.Lock()
 app.state.last_call_time = 0.0
 
+# ✅ Wait for rate limit delay
 async def wait_for_rate_limit():
     async with app.state.api_lock:
         now = time.time()
@@ -65,7 +75,7 @@ def build_prompt(subject: str, level: str, question: str) -> str:
         f"Please explain in a clear, friendly tone with examples to help them understand."
     )
 
-# ✅ OpenRouter API logic
+# ✅ OpenRouter API call
 async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="Missing OpenRouter API key")
@@ -73,7 +83,7 @@ async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://your-tutorbot.app",  # Optional for tracking
+        "HTTP-Referer": "https://your-tutorbot.app",  # Optional tracking
         "X-Title": "AI TutorBot"
     }
 
@@ -82,7 +92,7 @@ async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.6,
         "max_tokens": 200,
-        "user": student_id  # ✅ Helps OpenRouter track usage per user
+        "user": student_id
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -91,7 +101,7 @@ async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
                 response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 2 ** attempt))
-                    logger.warning(f"Rate limited by OpenRouter. Retrying in {retry_after}s...")
+                    logger.warning(f"Rate limited. Retrying in {retry_after}s...")
                     await asyncio.sleep(retry_after)
                     continue
 
@@ -109,12 +119,12 @@ async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
                 if attempt == retries:
                     raise HTTPException(status_code=502, detail="Failed to get response from AI Tutor")
 
-# ✅ Main endpoint
+# ✅ POST endpoint
 @app.post("/ask_tutor")
 async def ask_tutor(request: TutorRequest):
     await wait_for_rate_limit()
 
-    logger.info(f"📩 Received question from student {request.student_id} on subject: {request.subject}")
+    logger.info(f"📩 Question from student {request.student_id} on subject: {request.subject}")
     prompt = build_prompt(request.subject, request.level, request.question)
     response = await ask_openrouter(prompt, student_id=request.student_id)
 

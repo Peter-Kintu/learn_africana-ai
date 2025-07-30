@@ -6,6 +6,7 @@ import asyncio
 import time
 import httpx
 import os
+import google.generativeai as genai # Import the Gemini library
 
 # ✅ Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +15,7 @@ logger = logging.getLogger("TutorBot")
 # ✅ FastAPI app
 app = FastAPI(
     title="AI TutorBot",
-    description="An AI tutor assistant API powered by OpenRouter",
+    description="An AI tutor assistant API powered by Google Gemini",
     version="1.0"
 )
 
@@ -35,10 +36,19 @@ class TutorRequest(BaseModel):
     question: str
 
 # ✅ Config
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "mistral-7b-openorca"  # ✅ Free tier model
-MIN_DELAY = 10.0
+# Use GEMINI_API_KEY instead of OPENROUTER_API_KEY
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Configure the generative AI model
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Use gemini-pro for text-only generation
+    GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
+else:
+    logger.error("GEMINI_API_KEY is not set. AI functionality will be disabled.")
+    GEMINI_MODEL = None # Set to None if API key is missing
+
+MIN_DELAY = 10.0 # Still keep rate limiting for your backend calls
 
 # ✅ Global rate limiter
 app.state.api_lock = asyncio.Lock()
@@ -73,61 +83,37 @@ def build_prompt(subject: str, level: str, question: str) -> str:
         f"Please explain in a clear, friendly tone with examples."
     )
 
-# ✅ Ask OpenRouter
-async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
-    if not OPENROUTER_API_KEY:
-        logger.error("Missing OpenRouter API Key.")
-        raise HTTPException(status_code=500, detail="Missing OpenRouter API key")
+# ✅ Ask Gemini
+async def ask_gemini(prompt: str, student_id: str, retries: int = 3) -> str:
+    if not GEMINI_MODEL:
+        logger.error("Gemini model not configured due to missing API key.")
+        raise HTTPException(status_code=500, detail="AI service not available: API key missing.")
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://your-tutorbot.app",  # Optional for OpenRouter
-        "X-Title": "AI TutorBot"
-    }
+    for attempt in range(1, retries + 1):
+        try:
+            # Use the configured Gemini model to generate content
+            # The `generate_content` method sends the prompt to the model
+            response = await asyncio.to_thread(GEMINI_MODEL.generate_content, prompt)
+            
+            # Access the text from the response
+            # Gemini's response structure is different from OpenRouter's
+            reply = response.text.strip()
 
-    payload = {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.6,
-        "max_tokens": 200,
-        "user": student_id
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        for attempt in range(1, retries + 1):
-            try:
-                response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
-                response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
-                data = response.json()
-                reply = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-
-                if not reply:
-                    logger.warning(f"Attempt {attempt}: Empty reply from OpenRouter for student {student_id}. Full response: {data}")
-                    # If it's the last attempt and still no reply, raise an error
-                    if attempt == retries:
-                        raise ValueError("Empty reply from OpenRouter after multiple attempts.")
-                    else:
-                        # Continue to next retry if reply is empty but not last attempt
-                        await asyncio.sleep(2 ** attempt) # Exponential backoff
-                        continue
-
-                return reply
-
-            except httpx.HTTPStatusError as e:
-                logger.error(f"Status error {e.response.status_code}: {e.response.text} for student {student_id}")
-                if e.response.status_code == 429:
-                    retry_after = int(e.response.headers.get("Retry-After", 2 ** attempt))
-                    logger.warning(f"Rate limited. Retrying in {retry_after}s...")
-                    await asyncio.sleep(retry_after)
-                elif attempt == retries:
-                    raise HTTPException(status_code=502, detail=f"Failed to get response from the tutor: {e.response.text}")
-            except Exception as e:
-                logger.error(f"Attempt {attempt} failed for student {student_id}: {e}")
+            if not reply:
+                logger.warning(f"Attempt {attempt}: Empty reply from Gemini for student {student_id}. Full response: {response}")
                 if attempt == retries:
-                    raise HTTPException(status_code=502, detail=f"TutorBot failed to respond: {str(e)}")
-                # Exponential backoff for other exceptions before retrying
-                await asyncio.sleep(2 ** attempt)
+                    raise ValueError("Empty reply from Gemini after multiple attempts.")
+                else:
+                    await asyncio.sleep(2 ** attempt) # Exponential backoff
+                    continue
+
+            return reply
+
+        except Exception as e:
+            logger.error(f"Attempt {attempt} failed for student {student_id} with Gemini API: {e}")
+            if attempt == retries:
+                raise HTTPException(status_code=502, detail=f"TutorBot failed to respond from Gemini: {str(e)}")
+            await asyncio.sleep(2 ** attempt) # Exponential backoff for all exceptions
 
 # ✅ API endpoint
 @app.post("/ask_tutor")
@@ -135,9 +121,9 @@ async def ask_tutor(request: TutorRequest):
     await wait_for_rate_limit()
     logger.info(f"Student: {request.student_id} | Subject: {request.subject} | Question: {request.question}")
     prompt = build_prompt(request.subject, request.level, request.question)
-    answer = await ask_openrouter(prompt, student_id=request.student_id)
+    answer = await ask_gemini(prompt, student_id=request.student_id) # Call the Gemini specific function
 
-    # Provide a fallback message if the answer is still empty (should be caught by ask_openrouter, but as a final safeguard)
+    # Provide a fallback message if the answer is still empty (should be caught by ask_gemini, but as a final safeguard)
     if not answer:
         answer = "Apologies, the TutorBot couldn’t generate a reply. Please try again shortly."
         logger.warning(f"Final answer was empty for student {request.student_id}. Using fallback message.")

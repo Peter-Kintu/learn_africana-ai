@@ -3,3 +3,4 @@ httpx==0.27.0
 fastapi==0.95.2
 requests==2.32.4
 python-dotenv==1.0.1
+google-generativeai==0.7.1 # Added for Gemini API

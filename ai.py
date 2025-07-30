@@ -98,27 +98,36 @@ async def ask_openrouter(prompt: str, student_id: str, retries: int = 3) -> str:
         for attempt in range(1, retries + 1):
             try:
                 response = await client.post(OPENROUTER_API_URL, headers=headers, json=payload)
-                response.raise_for_status()
+                response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
                 data = response.json()
                 reply = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
                 if not reply:
-                    raise ValueError("Empty reply from OpenRouter")
+                    logger.warning(f"Attempt {attempt}: Empty reply from OpenRouter for student {student_id}. Full response: {data}")
+                    # If it's the last attempt and still no reply, raise an error
+                    if attempt == retries:
+                        raise ValueError("Empty reply from OpenRouter after multiple attempts.")
+                    else:
+                        # Continue to next retry if reply is empty but not last attempt
+                        await asyncio.sleep(2 ** attempt) # Exponential backoff
+                        continue
 
                 return reply
 
             except httpx.HTTPStatusError as e:
-                logger.error(f"Status error {e.response.status_code}: {e.response.text}")
+                logger.error(f"Status error {e.response.status_code}: {e.response.text} for student {student_id}")
                 if e.response.status_code == 429:
                     retry_after = int(e.response.headers.get("Retry-After", 2 ** attempt))
                     logger.warning(f"Rate limited. Retrying in {retry_after}s...")
                     await asyncio.sleep(retry_after)
                 elif attempt == retries:
-                    raise HTTPException(status_code=502, detail="Failed to get response from the tutor")
+                    raise HTTPException(status_code=502, detail=f"Failed to get response from the tutor: {e.response.text}")
             except Exception as e:
-                logger.error(f"Attempt {attempt} failed: {e}")
+                logger.error(f"Attempt {attempt} failed for student {student_id}: {e}")
                 if attempt == retries:
-                    raise HTTPException(status_code=502, detail="TutorBot failed to respond")
+                    raise HTTPException(status_code=502, detail=f"TutorBot failed to respond: {str(e)}")
+                # Exponential backoff for other exceptions before retrying
+                await asyncio.sleep(2 ** attempt)
 
 # ✅ API endpoint
 @app.post("/ask_tutor")
@@ -127,6 +136,11 @@ async def ask_tutor(request: TutorRequest):
     logger.info(f"Student: {request.student_id} | Subject: {request.subject} | Question: {request.question}")
     prompt = build_prompt(request.subject, request.level, request.question)
     answer = await ask_openrouter(prompt, student_id=request.student_id)
+
+    # Provide a fallback message if the answer is still empty (should be caught by ask_openrouter, but as a final safeguard)
+    if not answer:
+        answer = "Apologies, the TutorBot couldn’t generate a reply. Please try again shortly."
+        logger.warning(f"Final answer was empty for student {request.student_id}. Using fallback message.")
 
     return {
         "student_id": request.student_id,

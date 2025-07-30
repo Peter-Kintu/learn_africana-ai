@@ -93,7 +93,14 @@ async def ask_gemini(prompt: str, student_id: str, retries: int = 3) -> str:
         try:
             # Use the configured Gemini model to generate content
             # The `generate_content` method sends the prompt to the model
-            response = await asyncio.to_thread(GEMINI_MODEL.generate_content, prompt)
+            # Added generation_config to control max_output_tokens
+            response = await asyncio.to_thread(
+                GEMINI_MODEL.generate_content,
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=1000 # Increased from default/previous to allow longer responses
+                )
+            )
             
             # Access the text from the response
             # Gemini's response structure is different from OpenRouter's
